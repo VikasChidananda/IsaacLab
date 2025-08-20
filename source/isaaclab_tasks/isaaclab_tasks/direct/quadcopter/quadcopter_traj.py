@@ -25,6 +25,7 @@ from isaaclab.utils.math import subtract_frame_transforms
 from isaaclab_assets import CRAZYFLIE_CFG  # isort: skip
 from isaaclab.markers import CUBOID_MARKER_CFG  # isort: skip
 
+from .trajectory_generator import TrajectoryManager # isort: skip
 
 class QuadcopterEnvWindow(BaseEnvWindow):
     """Window manager for the Quadcopter environment."""
@@ -85,7 +86,7 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
     )
 
     # scene
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=2.5, replicate_physics=True)
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=1, env_spacing=2.5, replicate_physics=True)
 
     # robot
     robot: ArticulationCfg = CRAZYFLIE_CFG.replace(prim_path="/World/envs/env_.*/Robot")
@@ -101,7 +102,7 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
 class QuadcopterEnv(DirectRLEnv):
     cfg: QuadcopterEnvCfg
 
-    def __init__(self, cfg: QuadcopterEnvCfg, render_mode: str | None = None, **kwargs):
+    def __init__(self, cfg: QuadcopterEnvCfg, render_mode: str | None = None, traj_type = 0, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
 
         # Total thrust and moment applied to the base of the quadcopter
@@ -109,7 +110,12 @@ class QuadcopterEnv(DirectRLEnv):
         self._thrust = torch.zeros(self.num_envs, 1, 3, device=self.device)
         self._moment = torch.zeros(self.num_envs, 1, 3, device=self.device)
         # Goal position
+        self.traj_type = traj_type # 0: circle, 1: lemniscate, 2: waypoints
+
         self._desired_pos_w = torch.zeros(self.num_envs, 3, device=self.device)
+
+        self.traj_manager = TrajectoryManager(self.cfg, traj_type=self.traj_type)
+        # self._desired_pos_w = self.traj_manager.get_next_position(self.t)
 
         # Logging
         self._episode_sums = {
@@ -128,6 +134,7 @@ class QuadcopterEnv(DirectRLEnv):
 
         # add handle for debug visualization (this is set to a valid handle inside set_debug_vis)
         self.set_debug_vis(self.cfg.debug_vis)
+    
 
     def _setup_scene(self):
         self._robot = Articulation(self.cfg.robot)
@@ -164,6 +171,10 @@ class QuadcopterEnv(DirectRLEnv):
             dim=-1,
         )
         observations = {"policy": obs}
+
+        self.t += 1
+        self._desired_pos_w[:, :] = self.traj_manager.get_next_position(self.t)
+
         return observations
 
     def _get_rewards(self) -> torch.Tensor:
@@ -215,10 +226,13 @@ class QuadcopterEnv(DirectRLEnv):
             self.episode_length_buf = torch.randint_like(self.episode_length_buf, high=int(self.max_episode_length))
 
         self._actions[env_ids] = 0.0
-        # Sample new commands
-        self._desired_pos_w[env_ids, :2] = torch.zeros_like(self._desired_pos_w[env_ids, :2]).uniform_(-2.0, 2.0)
+        # Sample new commands new starting positions
+        self.t = 0
+        self._desired_pos_w[env_ids] = self.traj_manager.get_next_position(self.t)
+        # Reset goal position to a random position within the terrain bounds
+        # self._desired_pos_w[env_ids, :2] = torch.zeros_like(self._desired_pos_w[env_ids, :2]).uniform_(-2.0, 2.0)
         self._desired_pos_w[env_ids, :2] += self._terrain.env_origins[env_ids, :2]
-        self._desired_pos_w[env_ids, 2] = torch.zeros_like(self._desired_pos_w[env_ids, 2]).uniform_(0.5, 1.5)
+        # self._desired_pos_w[env_ids, 2] = torch.zeros_like(self._desired_pos_w[env_ids, 2]).uniform_(0.5, 1.5)
         # Reset robot state
         joint_pos = self._robot.data.default_joint_pos[env_ids]
         joint_vel = self._robot.data.default_joint_vel[env_ids]
